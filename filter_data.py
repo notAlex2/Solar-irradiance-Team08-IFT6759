@@ -49,24 +49,39 @@ def filter_data(dfpath, n = 0, stat = None):
 
             data = Stat_df[df]
             DAYTIME = np.str(df+'_DAYTIME') #Station's DAYTIME column
+            GHI = np.str(df+'_GHI') #Station's GHI column
             
             for j in range(0,len(data.index)-n):
-                if int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
-                    drop_indexes.append(j) #Storing the indexes to avoid changing the lenght of the DF while iterating
+                if j<n:
+                    if int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
+                        drop_indexes.append(j) #Storing the indexes to avoid changing the lenght of the DF while iterating
+                else:
+                    if int(data[DAYTIME][data.index[j-n]])==0 and int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
+                        drop_indexes.append(j)                    
             
             data.drop(data.index[drop_indexes], inplace=True)
+            
             print(np.str(len(drop_indexes))+" indexes dropped from station "+str(df))
             drop_indexes = []
-            Stat_df[df]=data
+            Stat_df[df]=pd.concat([data.iloc[:,0:4],data[GHI]],axis=1)
+    
+        return Stat_df
+    
     else:
         print("Cleaning station :",stat)
         data = Stat_df[stat]
         DAYTIME = np.str(stat+'_DAYTIME')
+        GHI = np.str(stat+'_GHI') #Station's GHI column
+        
         for j in range(0,len(data.index)-n):
-            if int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
-                drop_indexes.append(j)
+            if j<n:
+                if int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
+                    drop_indexes.append(j) #Storing the indexes to avoid changing the lenght of the DF while iterating
+            else:
+                if int(data[DAYTIME][data.index[j-n]])==0 and int(data[DAYTIME][data.index[j]])==0 and int(data[DAYTIME][data.index[j+n]])==0:
+                    drop_indexes.append(j)
+        
         data.drop(data.index[drop_indexes], inplace=True)
         print(np.str(len(drop_indexes))+" indexes dropped from station "+str(stat))
 
-        Stat_df[stat]=data       
-    return Stat_df
+        return pd.concat([data.iloc[:,0:4],data[GHI]],axis=1)
