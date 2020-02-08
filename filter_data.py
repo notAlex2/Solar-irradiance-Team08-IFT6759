@@ -1,8 +1,6 @@
 import pathlib
-import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-import tensorflow as tf
 import pickle
 
 def filter_data(dfpath, n = 0, stat = None):
