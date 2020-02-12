@@ -201,7 +201,7 @@ def crop_images(
             coords = (np.argmin(np.abs(lats - lats_lons[0])), np.argmin(np.abs(lons - lats_lons[1])))
             stations_coords[region] = coords
 
-        print(stations_coords)
+        # print(stations_coords)
 
         # normalize arrays and crop the station for each channel
         # ML: I'm not sure if we need to normalize at this level
@@ -224,8 +224,7 @@ def crop_images(
             ch4_crop = ch4_data[x_coord - window_size:x_coord + window_size, y_coord-window_size:y_coord + window_size]
             ch6_crop = ch6_data[x_coord - window_size:x_coord + window_size, y_coord-window_size:y_coord + window_size]
 
-            img_crop.update({station: np.stack((ch1_crop, ch2_crop, ch3_crop, ch4_crop, ch6_crop), axis=-1),
-                             'offset': hdf5_offset})
+            img_crop.update({hdf5_offset: np.stack((ch1_crop, ch2_crop, ch3_crop, ch4_crop, ch6_crop), axis=-1)})
             # save the images as .h5 file, will need to specify path
             # generate_images(img_crop, station_name, file_date, hdf5_offset)
 
@@ -251,21 +250,26 @@ if __name__ == '__main__':
     # We need instead loop over the batch_size which can be a couple of days, each day has one H5 file.
     # for index, row in dataframe.iterrows():
 
-    #print("clean_data.keys()=", clean_data.keys())
+    # print("clean_data.keys()=", clean_data.keys())
     record_days = {}
     h5_files_path = {}
     batch = extract_config["batch_size"]
     HDF5_Path_col = np.str("hdf5_" + extract_config["image_compression"] + "_path")
     HDF5_Offset_col = np.str("hdf5_" + extract_config["image_compression"] + "_offset")
 
-    dataset = []
+    dataset = {}
 
     for station in clean_data.keys():
-        #record_days.update({station: np.unique(clean_data[station].index.strftime("%Y-%m-%d"))})
-        for i in range(0, len(clean_data[station])//batch, batch):
+        print("Nbr of stations: ", len(clean_data.keys()))
+        # record_days.update({station: np.unique(clean_data[station].index.strftime("%Y-%m-%d"))})
+        for i in range(0, len(clean_data[station]) // batch, batch):
+            print("Nbr of batchs: ", len(clean_data[station]) // batch)
             # clean_data[station].index.isin(pd.to_datetime(record_days[i:i+batch]))][HDF5_Path_col].unique()
             h5_files_path = clean_data[station].iloc[i:i + batch, :][HDF5_Path_col].unique()
-            print("h5_files_path=", h5_files_path)
+
+            print("Nbr of H5 files to process: ", len(h5_files_path))
+            print("List of h5 files to process=", h5_files_path)
+
             for j in range(0, len(h5_files_path)):
                 hdf5_path = extract_config["hdf5_path"]  # h5_files_path[j] because its running localy
                 print("Processing h5 file(s):", hdf5_path)
@@ -273,8 +277,14 @@ if __name__ == '__main__':
                 print("hdf5_offset = ", hdf5_offset)
                 # Extract and fetch and crop images from HDF5 files
                 print("Extract and crop channels from HDF5 files ...")
-                dataset.append(crop_images(hdf5_path, extract_config["crop_shape"], extract_config["image_compression"], hdf5_offset, extract_config["stations"]))
-
+                img_cropped = crop_images(hdf5_path, extract_config["crop_shape"], extract_config["image_compression"], hdf5_offset, extract_config["stations"])
+                dataset.update({station: img_cropped})
+                break
+            break
+        break
+    for i in dataset.keys():
+        print("dataset size = ", np.str(i), len(dataset[i]))
+        print("Shape of the cropped imgs: ", dataset[i][32].shape)
     # file_date = hdf5_path.split("/")[-1]
     # date of the file
     # file_date = "_".join(file_date.split('.'))[:-3]
