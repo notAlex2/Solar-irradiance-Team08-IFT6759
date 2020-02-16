@@ -3,22 +3,66 @@ import datetime
 import json
 import os
 import typing
+import sys
 
 from data_loader import DataLoader
-from main_model import MainModel
-from model_logging import get_logger
+from model_logging import get_logger, get_summary_writer
 
 import pandas as pd
 import numpy as np
 import tensorflow as tf
 import tqdm
 
-
-def compute_rmse(y_true, y_pred):
-    return tf.sqrt(tf.reduce_mean((y_true - y_pred)**2))
+logger = get_logger()
 
 
+def do_code_profiling(function):
+    def wrapper(*args, **kwargs):
+        if args[-1]["code_profiling_enabled"]:
+            import cProfile
+            import pstats
+            profile = cProfile.Profile()
+            profile.enable()
+
+            x = function(*args, **kwargs)
+
+            profile.disable()
+            profile.dump_stats("log/profiling_results.prof")
+            with open("log/profiling_results.txt", "w") as f:
+                ps = pstats.Stats("log/profiling_results.prof", stream=f)
+                ps.sort_stats('cumulative')
+                ps.print_stats()
+            return x
+        else:
+            return function(*args, **kwargs)
+    return wrapper
+
+
+def mask_nighttime_predictions(y_pred, y_true, night_flag):
+    day_flag = 1.0 - night_flag
+    masked_y_pred = tf.multiply(y_pred, day_flag) + tf.multiply(y_true, night_flag)
+    return masked_y_pred
+
+
+def train_step(model, optimizer, loss_fn, x_train, y_train):
+    with tf.GradientTape() as tape:
+        y_pred = model(x_train, training=True)
+        y_pred = mask_nighttime_predictions(y_pred, y_train, x_train[3])
+        loss = loss_fn(y_train, y_pred)
+    gradient = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradient, model.trainable_variables))
+    return loss, y_train, y_pred
+
+
+def test_step(model, loss_fn, x_test, y_test):
+    y_pred = model(x_test)
+    loss = loss_fn(y_test, y_pred)
+    return loss, y_test, y_pred
+
+
+@do_code_profiling
 def train(
+        MainModel,
         tr_stations: typing.Dict[typing.AnyStr, typing.Tuple[float, float, float]],
         val_stations: typing.Dict[typing.AnyStr, typing.Tuple[float, float, float]],
         tr_datetimes: typing.List[datetime.datetime],
@@ -26,20 +70,19 @@ def train(
         tr_time_offsets: typing.List[datetime.timedelta],
         val_time_offsets: typing.List[datetime.timedelta],
         dataframe: pd.DataFrame,
-        user_config: typing.Dict[typing.AnyStr, typing.Any],
+        user_config: typing.Dict[typing.AnyStr, typing.Any]
 ):
     """Trains and saves the model to file"""
+
+    # Import the training and validation data loaders, import the model
     Train_DL = DataLoader(dataframe, tr_datetimes, tr_stations, tr_time_offsets, user_config)
     Val_DL = DataLoader(dataframe, val_datetimes, val_stations, val_time_offsets, user_config)
     train_data_loader = Train_DL.get_data_loader()
     val_data_loader = Val_DL.get_data_loader()
-
-    nb_training_samples = len(tr_datetimes)
-    nb_validation_samples = len(val_datetimes)
-
     model = MainModel(tr_stations, tr_time_offsets, user_config)
 
-    logger = get_logger()
+    # Set up tensorboard logging
+    train_summary_writer, test_summary_writer = get_summary_writer()
 
     # set hyper-parameters
     nb_epoch = user_config["nb_epoch"]
@@ -48,56 +91,77 @@ def train(
     # Optimizer: Adam - for decaying learning rate
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
 
-    # RMSE loss: as it is a regression problem
-    loss_fn = compute_rmse
+    # Objective/Loss function: MSE Loss
+    loss_fn = tf.keras.losses.MeanSquaredError()
+
+    # Metrics to track:
+    train_loss = tf.keras.metrics.Mean('train_loss', dtype=tf.float32)
+    test_loss = tf.keras.metrics.Mean('test_loss', dtype=tf.float32)
+    train_rmse = tf.keras.metrics.RootMeanSquaredError()
+    test_rmse = tf.keras.metrics.RootMeanSquaredError()
 
     # training starts here
-    # TODO: Add tensorboard logging
     with tqdm.tqdm("training", total=nb_epoch) as pbar:
         for epoch in range(nb_epoch):
 
             # Train the model using the training set for one epoch
-            cumulative_train_loss = 0.0
             for minibatch in train_data_loader:
-                with tf.GradientTape() as tape:
-                    predictions = model(minibatch[:-1], training=True)
-                    loss = loss_fn(y_true=minibatch[-1], y_pred=predictions)
-                gradient = tape.gradient(loss, model.trainable_variables)
-                optimizer.apply_gradients(zip(gradient, model.trainable_variables))
-                cumulative_train_loss += loss
-            cumulative_train_loss /= nb_training_samples
+                loss, y_train, y_pred = train_step(
+                    model,
+                    optimizer,
+                    loss_fn,
+                    x_train=minibatch[:-1],
+                    y_train=minibatch[-1]
+                )
+                train_loss(loss)
+                train_rmse(y_train, y_pred)
+
+            with train_summary_writer.as_default():
+                tf.summary.scalar('loss', train_loss.result(), step=epoch)
+                tf.summary.scalar('rmse', train_rmse.result(), step=epoch)
 
             # Evaluate model performance on the validation set after training for one epoch
-            cumulative_val_loss = 0.0
             for minibatch in val_data_loader:
-                predictions = model(minibatch[:-1])
-                cumulative_val_loss += loss_fn(y_true=minibatch[-1], y_pred=predictions)
-            cumulative_val_loss /= nb_validation_samples
+                loss, y_test, y_pred = test_step(
+                    model,
+                    loss_fn,
+                    x_test=minibatch[:-1],
+                    y_test=minibatch[-1]
+                )
+                test_loss(loss)
+                test_rmse(y_test, y_pred)
+
+            with test_summary_writer.as_default():
+                tf.summary.scalar('loss', test_loss.result(), step=epoch)
+                tf.summary.scalar('rmse', test_rmse.result(), step=epoch)
 
             logger.debug(
                 "Epoch {0}/{1}, Train Loss = {2}, Val Loss = {3}"
-                .format(epoch + 1, nb_epoch, cumulative_train_loss.numpy(), cumulative_val_loss.numpy())
+                .format(epoch + 1, nb_epoch, train_loss.result(), test_loss.result())
             )
+
+            # Reset metrics every epoch
+            train_loss.reset_states()
+            train_rmse.reset_states()
+            test_loss.reset_states()
+            test_rmse.reset_states()
+
             pbar.update(1)
 
     # save model weights to file
     model.save_weights("model/my_model", save_format="tf")
 
 
+def load_file(path, name):
+    assert os.path.isfile(path), f"invalid {name} config file: {path}"
+    with open(path, "r") as fd:
+        return json.load(fd)
+
+
 def load_files(user_config_path, train_config_path, val_config_path):
-    user_config = {}
-    if user_config_path:
-        assert os.path.isfile(user_config_path), f"invalid user config file: {user_config_path}"
-        with open(user_config_path, "r") as fd:
-            user_config = json.load(fd)
-
-    assert os.path.isfile(train_config_path), f"invalid training config file: {train_config_path}"
-    with open(train_config_path, "r") as fd:
-        train_config = json.load(fd)
-
-    assert os.path.isfile(val_config_path), f"invalid validation config file: {val_config_path}"
-    with open(val_config_path, "r") as fd:
-        val_config = json.load(fd)
+    user_config = load_file(user_config_path, "user")
+    train_config = load_file(train_config_path, "training")
+    val_config = load_file(val_config_path, "validation")
 
     dataframe_path = train_config["dataframe_path"]
     assert os.path.isfile(dataframe_path), f"invalid dataframe path: {dataframe_path}"
@@ -124,12 +188,24 @@ def get_targets(dataframe, config):
     return datetimes, stations, time_offsets
 
 
+def select_model(user_config):
+    if user_config["target_model"] == "truth_predictor_model":
+        from truth_predictor_model import MainModel
+    elif user_config["target_model"] == "clearsky_model":
+        from clearsky_model import MainModel
+    elif user_config["target_model"] == "3d_cnn_model":
+        from cnn_3d_model import MainModel
+    else:
+        raise Exception("Unknown model")
+
+    return MainModel
+
+
 def main(
         train_config_path: typing.AnyStr,
         val_config_path: typing.AnyStr,
         user_config_path: typing.Optional[typing.AnyStr] = None,
 ) -> None:
-    """Extracts predictions from a user model/data loader combo and saves them to a CSV file."""
 
     user_config, train_config, val_config, dataframe = \
         load_files(user_config_path, train_config_path, val_config_path)
@@ -143,16 +219,22 @@ def main(
     val_datetimes, val_stations, val_time_offsets = \
         get_targets(dataframe, val_config)
 
-    train(
-        tr_stations,
-        val_stations,
-        tr_datetimes,
-        val_datetimes,
-        tr_time_offsets,
-        val_time_offsets,
-        dataframe,
-        user_config
-    )
+    MainModel = select_model(user_config)
+
+    if MainModel.TRAINING_REQUIRED:
+        train(
+            MainModel,
+            tr_stations,
+            val_stations,
+            tr_datetimes,
+            val_datetimes,
+            tr_time_offsets,
+            val_time_offsets,
+            dataframe,
+            user_config
+        )
+    else:
+        logger.warning("Model not trained; Model doesn't require training")
 
 
 def parse_args():
@@ -167,6 +249,7 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    logger.info(str(sys.argv))
     args = parse_args()
     main(
         train_config_path=args.train_cfg_path,
