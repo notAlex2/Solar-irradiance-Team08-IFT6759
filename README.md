@@ -3,6 +3,11 @@
 This project was created as part of the UdeM course IFT6759 (https://admission.umontreal.ca/cours-et-horaires/cours/IFT-6759/). The objective of this project is to predict present and future (up to 6 hours) solar irradiance at any point on a map of continental united states by only using present and past remote sensing readings from satellites (GOES-13). We propose a machine learning model for prediction of solar irradiance. Refer to the report and presentation included in this reporistory for more details.
 
 ### Team 08
+* Alexander Peplowski
+* Harmanpreet Singh
+* Marc-Antoine Provost
+* Mohammed Loukili
+
 
 ### To run the evaluation script:
 
